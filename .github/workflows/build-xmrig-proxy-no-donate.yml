@@ -4,7 +4,7 @@ on:
     branches: [ master ]
   pull_request:
     branches: [ master ]
-  workflow_dispatch: # 允许手动触发编译
+  workflow_dispatch:
 
 jobs:
   build:
@@ -19,7 +19,7 @@ jobs:
             cmake-args: ""
           - os: ubuntu-latest
             arch: arm64
-            cmake-args: "-DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++"
+            cmake-args: "-DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ -DCMAKE_SYSTEM_PROCESSOR=aarch64"
           - os: windows-latest
             arch: x64
             cmake-args: ""
@@ -36,64 +36,86 @@ jobs:
         with:
           submodules: recursive
 
+      # Windows 依赖安装 (vcpkg)
+      - name: Setup vcpkg (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: 79b5698fa1c49b46b52f62b94a60e94d1d76022d
+
+      - name: Install dependencies (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          vcpkg install libuv:x64-windows openssl:x64-windows
+          vcpkg integrate install
+
+      # 移除捐赠机制 (Linux/macOS)
       - name: Remove donation mechanism (Linux/macOS)
         if: matrix.os != 'windows-latest'
         run: |
-          # 1. 强制设置捐赠级别为0，忽略所有配置
           sed -i 's/m_donateLevel = reader.getInt("donate-level", kDefaultDonateLevel);/m_donateLevel = 0;/g' src/core/config/Config.cpp
-          
-          # 2. 让捐赠策略永远不激活
           sed -i 's/return m_active && m_level > 0 && m_workers > 256;/return false;/g' src/net/strategies/DonateStrategy.cpp
-          
-          # 3. 直接返回，不处理任何捐赠提交
           sed -i '/bool DonateStrategy::submit/a \    return false;' src/net/strategies/DonateStrategy.cpp
-          
-          # 4. 直接返回，不执行任何捐赠切换逻辑
           sed -i '/void DonateStrategy::tick/a \    return;' src/net/strategies/DonateStrategy.cpp
-          
-          # 5. 替换硬编码的捐赠地址为无效地址（彻底保险）
           sed -i 's/pool.xmrig.com:3333/127.0.0.1:0/g' src/net/strategies/DonateStrategy.cpp
           sed -i 's/48edfHu7V9Z84YzzMa6fUueoELZ9ZRXq9VetWzYGzKt52XU5xvqgzYnDK9URnRoJMk1j8nLwEVsaSWJ4fhdUyZijBGUicoD/disabled/g' src/net/strategies/DonateStrategy.cpp
 
+      # 移除捐赠机制 (Windows)
       - name: Remove donation mechanism (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          # Windows 环境使用 PowerShell 替换文本
           (Get-Content src/core/config/Config.cpp) -replace 'm_donateLevel = reader.getInt\("donate-level", kDefaultDonateLevel\);', 'm_donateLevel = 0;' | Set-Content src/core/config/Config.cpp
-          
           (Get-Content src/net/strategies/DonateStrategy.cpp) -replace 'return m_active && m_level > 0 && m_workers > 256;', 'return false;' | Set-Content src/net/strategies/DonateStrategy.cpp
-          
           (Get-Content src/net/strategies/DonateStrategy.cpp) -replace 'bool DonateStrategy::submit\(const JobResult &result\)', "bool DonateStrategy::submit(const JobResult &result)`n    return false;" | Set-Content src/net/strategies/DonateStrategy.cpp
-          
           (Get-Content src/net/strategies/DonateStrategy.cpp) -replace 'void DonateStrategy::tick\(uint64_t now\)', "void DonateStrategy::tick(uint64_t now)`n    return;" | Set-Content src/net/strategies/DonateStrategy.cpp
-          
           (Get-Content src/net/strategies/DonateStrategy.cpp) -replace 'pool.xmrig.com:3333', '127.0.0.1:0' | Set-Content src/net/strategies/DonateStrategy.cpp
           (Get-Content src/net/strategies/DonateStrategy.cpp) -replace '48edfHu7V9Z84YzzMa6fUueoELZ9ZRXq9VetWzYGzKt52XU5xvqgzYnDK9URnRoJMk1j8nLwEVsaSWJ4fhdUyZijBGUicoD', 'disabled' | Set-Content src/net/strategies/DonateStrategy.cpp
 
+      # Linux 依赖安装 (修复 ARM64 交叉编译)
       - name: Install dependencies (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt update
-          sudo apt install -y build-essential cmake libssl-dev
-          if [ "${{ matrix.arch }}" = "arm64" ]; then
+          sudo apt install -y build-essential cmake
+          
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            # x86_64 原生编译
+            sudo apt install -y libssl-dev libuv1-dev
+          else
+            # ARM64 交叉编译
+            sudo dpkg --add-architecture arm64
+            sudo apt update
             sudo apt install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            sudo apt install -y libssl-dev:arm64 libuv1-dev:arm64
+            # 设置 pkg-config 路径
+            export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
+            echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> $GITHUB_ENV
           fi
 
+      # macOS 依赖安装
       - name: Install dependencies (macOS)
         if: matrix.os == 'macos-latest'
-        run: brew install cmake openssl
+        run: brew install cmake openssl libuv
 
-      - name: Configure CMake (双重禁用捐赠)
+      # CMake 配置
+      - name: Configure CMake
         run: |
           mkdir build
           cd build
-          cmake .. ${{ matrix.cmake-args }} -DCMAKE_BUILD_TYPE=Release -DWITH_DONATE=OFF
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cmake .. ${{ matrix.cmake-args }} -DCMAKE_BUILD_TYPE=Release -DWITH_DONATE=OFF -DCMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake
+          else
+            cmake .. ${{ matrix.cmake-args }} -DCMAKE_BUILD_TYPE=Release -DWITH_DONATE=OFF
+          fi
+        shell: bash
 
+      # 编译
       - name: Build
         run: |
           cd build
           cmake --build . --config Release -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 
+      # 打包产物
       - name: Prepare artifacts
         run: |
           mkdir -p artifacts
@@ -103,15 +125,15 @@ jobs:
             cp build/xmrig-proxy artifacts/
           fi
           cp README.md LICENSE artifacts/
-          
-          # 创建版本信息文件
-          echo "XMRig Proxy No Donate Version" > artifacts/VERSION.txt
-          echo "Build date: $(date)" >> artifacts/VERSION.txt
+          echo "XMRig Proxy No Donate | Build date: $(date)" > artifacts/VERSION.txt
+          echo "Architecture: ${{ matrix.arch }}" >> artifacts/VERSION.txt
           echo "Donation level: 0% (completely removed)" >> artifacts/VERSION.txt
+        shell: bash
 
+      # 上传文件
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: xmrig-proxy-no-donate-${{ matrix.os }}-${{ matrix.arch }}
           path: artifacts/
-          retention-days: 90 # 保留90天
+          retention-days: 90
