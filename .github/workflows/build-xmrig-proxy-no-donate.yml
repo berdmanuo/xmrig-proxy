@@ -1,27 +1,29 @@
-name: Build xmrig-proxy for Ubuntu (no-donate)
+name: Build and Release xmrig-proxy (no-donate)
 
 on:
   push:
-    branches: [ master ]
-  workflow_dispatch:    # 允许手动触发
+    tags:
+      - 'v*'               # 推送 v1.0.0 这类 tag 时触发
+  workflow_dispatch:        # 允许手动触发
 
 jobs:
-  build-ubuntu:
-    runs-on: ubuntu-22.04    # 20.04 LTS 兼容性最好，也可用 ubuntu-latest
+  build-and-release:
+    runs-on: ubuntu-22.04   # 或 ubuntu-latest
+
+    permissions:
+      contents: write       # 需要写权限才能创建 Release
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
           sudo apt update
           sudo apt install -y git build-essential cmake libuv1-dev libssl-dev libhwloc-dev
 
       - name: Remove donation code
         run: |
-          # 注释掉头文件中的 DonateStrategy 成员
           sed -i '/DonateStrategy/d' src/proxy/Proxy.h
-          # 删除 cpp 中所有对 m_donate 的调用和 include
           sed -i '/m_donate/d' src/proxy/Proxy.cpp
           sed -i '/#include.*DonateStrategy/d' src/proxy/Proxy.cpp
 
@@ -31,8 +33,16 @@ jobs:
           cmake .. -DCMAKE_BUILD_TYPE=Release
           make -j$(nproc)
 
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
+      - name: Create Release and Upload Binary
+        uses: softprops/action-gh-release@v2
         with:
-          name: xmrig-proxy-ubuntu-no-donate
-          path: build/xmrig-proxy
+          files: build/xmrig-proxy
+          name: "xmrig-proxy ${{ github.ref_name }}"   # 用 tag 名称作为 Release 标题
+          tag_name: ${{ github.ref }}
+          body: |
+            Automated build without donation code.
+            Commit: ${{ github.sha }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
